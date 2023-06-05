@@ -1,0 +1,99 @@
+#pragma kernel CSMain
+
+#include "Assets/Raymarcher/RaymarcherBase.hlsl"
+#include "Assets/Raymarcher/Lighting.hlsl"
+#include "Assets/Raymarcher/GetShapeDistance.hlsl"
+
+Texture2D<float4> Source;
+RWTexture2D<float4> Destination;
+
+float4x4 _CameraToWorld;
+float4x4 _CameraInverseProjection;
+float3 _CameraForward;
+float3 _LightDirection;
+
+StructuredBuffer<SurfaceData> surfaceData;
+int surfaceCount;
+
+struct SceneDescriptor
+{
+    float distanceToSurface;
+};
+
+Surface Scene(float3 p)
+{
+    Surface surface;
+    surface.distanceToSurface = MAX_DIST;
+    for (int i = 0; i < surfaceCount; i++)
+    {
+        surface.distanceToSurface = opUnion(surface.distanceToSurface, GetShapeDistance(p, surfaceData[i]));
+    }
+
+    return surface;
+}
+
+
+float3 GetNormal(float3 surfPoint)
+{
+    float epsilon = 0.0001;
+    float centerDistance = Scene(surfPoint).distanceToSurface;
+    float xDistance = Scene(surfPoint + float3(epsilon, 0, 0)).distanceToSurface;
+    float yDistance = Scene(surfPoint + float3(0, epsilon, 0)).distanceToSurface;
+    float zDistance = Scene(surfPoint + float3(0, 0, epsilon)).distanceToSurface;
+    float3 normal = normalize(float3(xDistance, yDistance, zDistance) - centerDistance);
+
+    return normal;
+}
+
+float3 GetPixelColor(float3 lightDir, float3 normal)
+{
+    float diffuseMask = LambertLighting(normal, lightDir);
+    return diffuseMask;
+}
+
+Surface RayMarch(Ray ray)
+{
+    float distanceToScene = 0;
+    float nearest = MAX_DIST;
+    Surface closestSurface;
+
+    for (int i = 0; i < MAX_STEPS; i++)
+    {
+        float3 step = ray.origin + ray.direction * distanceToScene;
+        closestSurface = Scene(step);
+
+        nearest = min(closestSurface.distanceToSurface, nearest);
+
+        if (closestSurface.distanceToSurface < SURF_DIST || distanceToScene > MAX_DIST) break;
+        distanceToScene += closestSurface.distanceToSurface;
+    }
+    closestSurface.distanceToSurface = distanceToScene;
+
+    return closestSurface;
+}
+
+[numthreads(8,8,1)]
+void CSMain(uint3 id : SV_DispatchThreadID)
+{
+    uint width, height;
+    Destination.GetDimensions(width, height);
+    float2 uv = (id.xy / float2(width, height)) * 2 - 1;
+
+    float3 color = Source[id.xy].xyz;
+
+    Ray ray = CreateCameraRay(uv, _CameraToWorld, _CameraInverseProjection);
+
+    Surface closestSurface = RayMarch(ray);
+    const bool isSurfaceExists = closestSurface.distanceToSurface < MAX_DIST;
+
+    if (isSurfaceExists)
+    {
+        float3 surfPoint = ray.origin + ray.direction * closestSurface.distanceToSurface;
+        float3 normal = GetNormal(surfPoint);
+        float3 lightDir = -normalize(_LightDirection);
+
+        color = GetPixelColor(lightDir, normal);
+    }
+
+    Destination[id.xy] = float4(color, 1);
+}
